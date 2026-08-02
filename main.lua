@@ -76,25 +76,21 @@ local function check_ffmpeg(bin)
 end
 
 local function get_env_with_api_key()
-    local env = utils.get_env_list()
-    local new_env_item = nil
-    if options.api_key ~= "" then
-        new_env_item = "OPENAI_API_KEY=" .. options.api_key
+    if options.api_key == "" then
+        return nil
     end
-    for i, kv in ipairs(env) do
-        if kv:match("^OPENAI_API_KEY=.*$") ~= nil then
-            if new_env_item ~= nil then
-                env[i] = new_env_item
-            end
-            return env
-        end
-    end
-    if new_env_item ~= nil then
-        table.insert(env, new_env_item)
-        return env;
-    else
-        return nil;
-    end
+
+    -- Only pass the required variables to the subprocess.
+    local env = {
+        "OPENAI_API_KEY=" .. options.api_key,
+    }
+
+    local system_root = os.getenv("SystemRoot")
+    local windir = os.getenv("windir")
+    table.insert(env, "SystemRoot=" .. system_root)
+    table.insert(env, "windir=" .. windir)
+
+    return env
 end
 
 --- Find compatible python (or uv) execute
