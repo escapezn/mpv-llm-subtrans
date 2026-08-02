@@ -48,12 +48,12 @@ end
 local function check_python_openai(python_bin)
     local ret = mp.command_native({
         name="subprocess",
-        args={python_bin, "-m", "openai", "--version"},
+        args={python_bin, "-c", "import openai; print(openai.__version__)"},
         playback_only=false,
         capture_stdout=true,
     })
     if ret.status ~= 0 then
-        msg.warn(python_bin, "-m openai --version:", ret.status)
+        msg.warn(python_bin, "-c import openai:", ret.status)
         return false
     end
     msg.info("openai found:", ret.stdout:gsub("%s+$", ""))
