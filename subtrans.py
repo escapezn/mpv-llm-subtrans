@@ -311,6 +311,8 @@ class Args:
     output_path: str
     ipc_path: str
     extra_prompt: str
+    start_offset: float
+    max_duration: float
 
     def build_openai_client(self) -> tuple[OpenAI, str]:
         key = os.environ.get("OPENAI_API_KEY")
@@ -319,7 +321,6 @@ class Args:
         base_url = None
         model = None
         for platform in PLATFORM_DEFAUTLS.values():
-            print(platform, key, re.fullmatch(platform.key_regex, key))
             if re.fullmatch(platform.key_regex, key):
                 base_url = platform.base_url
                 model = platform.model
@@ -376,12 +377,43 @@ def get_cli_args() -> Args:
     parser.add_argument("--output-path", required=True)
     parser.add_argument("--ipc-path", required=True)
     parser.add_argument("--extra-prompt", default="")
+    parser.add_argument(
+        "--start-offset",
+        type=float,
+        default=0,
+        help="Skip subtitles ending before this time (seconds)",
+    )
+    parser.add_argument(
+        "--max-duration",
+        type=float,
+        default=0,
+        help="Stop after translating this many seconds of content from start-offset (0=unlimited)",
+    )
     return Args(**vars(parser.parse_args()))
 
 
 class Progress(TypedDict):
     last_seq: int
     last_timestamp_millis: tuple[int, int]
+
+
+def filter_by_offset(
+    lines: Iterator[SubtitleLine],
+    start_offset_ms: float,
+    end_offset_ms: float,
+) -> Iterator[SubtitleLine]:
+    """Filter subtitle lines to a time window.
+
+    Skips lines ending before start_offset_ms, stops when lines start
+    at or after end_offset_ms.
+    """
+    for line in lines:
+        ts = line.timestamp_millis
+        if ts[1] < start_offset_ms:
+            continue  # skip lines ending before the window
+        if end_offset_ms > 0 and ts[0] >= end_offset_ms:
+            return  # stop when past the window
+        yield line
 
 
 def process(args: Args, ipc: TextIO):
@@ -396,6 +428,23 @@ def process(args: Args, ipc: TextIO):
         # Extract subtitle with ffmpeg (async)
         subtitle_lines = extract_subtitle_from_video(
             args.ffmpeg_bin, args.video_url, args.sub_track_id
+        )
+
+    # Apply time-window filtering
+    start_offset_ms = args.start_offset * 1000
+    end_offset_ms = (
+        (args.start_offset + args.max_duration) * 1000
+        if args.max_duration > 0
+        else 0
+    )
+    if start_offset_ms > 0 or end_offset_ms > 0:
+        logging.info(
+            "Filtering: start_offset=%.1fs, max_duration=%.1fs",
+            args.start_offset,
+            args.max_duration,
+        )
+        subtitle_lines = filter_by_offset(
+            subtitle_lines, start_offset_ms, end_offset_ms
         )
 
     # Translate (async)
