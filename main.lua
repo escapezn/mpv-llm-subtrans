@@ -426,6 +426,17 @@ local function format_time(sec)
     return string.format("%d:%02d", m, s)
 end
 
+local function cleanup_chunk_dir(chunk_dir)
+    if chunk_dir == nil then return end
+    local entries = utils.readdir(chunk_dir)
+    if entries ~= nil then
+        for _, fname in ipairs(entries) do
+            os.remove(utils.join_path(chunk_dir, fname))
+        end
+    end
+    os.remove(chunk_dir)
+end
+
 function progressive_translate()
     -- If a session is active, cancel it
     if session ~= nil then
@@ -443,6 +454,7 @@ function progressive_translate()
         end
         -- Reload original subtitles
         mp.command_native({name="sub-reload"})
+        cleanup_chunk_dir(session.chunk_dir)
         session = nil
         chunk_py_handle = nil
         msg.info("Progressive translation cancelled")
@@ -478,6 +490,7 @@ function progressive_translate()
         else
             remove_ov(3)
         end
+        cleanup_chunk_dir(session.chunk_dir)
         session = nil
         if chunk_py_handle ~= nil then
             mp.abort_async_command(chunk_py_handle)
@@ -760,6 +773,7 @@ function progressive_translate()
                 show(ASS_COLOR_GREEN .. "all done")
                 msg.info("Progressive translation complete")
                 remove_ov(5)
+                cleanup_chunk_dir(session.chunk_dir)
                 session = nil
                 chunk_ov = nil
                 return
@@ -827,6 +841,7 @@ function progressive_translate()
                 show(ASS_COLOR_GREEN .. "all done")
                 msg.info("Progressive translation complete")
                 remove_ov(3)
+                cleanup_chunk_dir(session.chunk_dir)
                 session = nil
                 chunk_ov = nil
                 chunk_timer:kill()
