@@ -9,7 +9,7 @@ local options = {
     python_bin = "", -- path to python or uv, default to find `uv`, `python3` & `py` from PATH
     ffmpeg_bin = "ffmpeg", -- path to ffmpeg execute
     batch_size = 50, -- number of dialogous send in one translate request
-    output_dir = "~~cache/llm_subtrans_subtitles", -- where to put translated srt files
+    output_dir = "", -- where to put translated srt files, empty = save next to the video file
     extra_prompt = "", -- append to developer prompt
     skip_env_check = false, -- fast start, skip prerequisites checking
 }
@@ -266,7 +266,20 @@ function llm_subtrans_translate()
 
     -- set file path
     show("initializing")
-    local output_dir = mp.command_native({"expand-path", options.output_dir})
+    local output_dir
+    if options.output_dir == "" then
+        -- default: save next to the currently playing video file
+        local video_dir = utils.split_path(mp.get_property("path"))
+        if video_dir == nil or video_dir == "" then
+            -- fallback when no directory can be determined (e.g. URL)
+            output_dir = "~~cache/llm_subtrans_subtitles"
+        else
+            output_dir = video_dir
+        end
+        output_dir = mp.command_native({"expand-path", output_dir})
+    else
+        output_dir = mp.command_native({"expand-path", options.output_dir})
+    end
     local srt_path = utils.join_path(output_dir, mp.get_property("filename/no-ext") .. ".srt")
     msg.info("Save file to", srt_path)
 
