@@ -313,6 +313,7 @@ class Args:
     extra_prompt: str
     start_offset: float
     max_duration: float
+    start_seq: int
 
     def build_openai_client(self) -> tuple[OpenAI, str]:
         key = os.environ.get("OPENAI_API_KEY")
@@ -389,6 +390,12 @@ def get_cli_args() -> Args:
         default=0,
         help="Stop after translating this many seconds of content from start-offset (0=unlimited)",
     )
+    parser.add_argument(
+        "--start-seq",
+        type=int,
+        default=0,
+        help="Skip subtitles with sequence number <= this value",
+    )
     return Args(**vars(parser.parse_args()))
 
 
@@ -401,13 +408,17 @@ def filter_by_offset(
     lines: Iterator[SubtitleLine],
     start_offset_ms: float,
     end_offset_ms: float,
+    start_seq: int,
 ) -> Iterator[SubtitleLine]:
     """Filter subtitle lines to a time window.
 
     Skips lines ending before start_offset_ms, stops when lines start
-    at or after end_offset_ms.
+    at or after end_offset_ms. Also skips lines with seq <= start_seq
+    for precise chunk boundary control.
     """
     for line in lines:
+        if start_seq > 0 and line.seq <= start_seq:
+            continue  # skip already-translated lines by sequence number
         ts = line.timestamp_millis
         if ts[1] < start_offset_ms:
             continue  # skip lines ending before the window
@@ -437,14 +448,15 @@ def process(args: Args, ipc: TextIO):
         if args.max_duration > 0
         else 0
     )
-    if start_offset_ms > 0 or end_offset_ms > 0:
+    if start_offset_ms > 0 or end_offset_ms > 0 or args.start_seq > 0:
         logging.info(
-            "Filtering: start_offset=%.1fs, max_duration=%.1fs",
+            "Filtering: start_offset=%.1fs, max_duration=%.1fs, start_seq=%d",
             args.start_offset,
             args.max_duration,
+            args.start_seq,
         )
         subtitle_lines = filter_by_offset(
-            subtitle_lines, start_offset_ms, end_offset_ms
+            subtitle_lines, start_offset_ms, end_offset_ms, args.start_seq
         )
 
     # Translate (async)

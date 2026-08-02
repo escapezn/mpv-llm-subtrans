@@ -578,6 +578,7 @@ function progressive_translate()
     session.chunk_dir = chunk_dir
     session.chunk_index = 0
     session.chunk_files = {}
+    session.last_translated_seq = 0  -- for precise chunk boundary skipping
 
     -- Check API key
     local env = get_env_with_api_key()
@@ -638,6 +639,7 @@ function progressive_translate()
             "--ipc-path", chunk_ipc,
             "--start-offset", string.format("%.3f", start_sec),
             "--max-duration", string.format("%.3f", end_sec - start_sec),
+            "--start-seq", session.last_translated_seq .. "",
         }) do
             table.insert(chunk_args, v)
         end
@@ -714,8 +716,14 @@ function progressive_translate()
                         session.translated_end_sec = end_ms / 1000
                     end
                 end
+                -- Update last_translated_seq for precise next-chunk boundary
+                if progress ~= nil and progress["last_seq"] ~= nil then
+                    session.last_translated_seq = progress["last_seq"]
+                end
             else
                 msg.info("Chunk #" .. ci .. " produced no subtitles (empty window)")
+                -- Advance past the empty window to avoid infinite retries
+                session.translated_end_sec = end_sec
             end
 
             -- Concatenate all chunks into final SRT
