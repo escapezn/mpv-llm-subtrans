@@ -12,8 +12,8 @@ local options = {
     output_dir = "", -- where to put translated srt files, empty = save next to the video file
     extra_prompt = "", -- append to developer prompt
     skip_env_check = false, -- fast start, skip prerequisites checking
-    pre_translate_seconds = 300, -- how far ahead to translate in progressive mode (10 min)
-    advance_threshold_seconds = 60, -- trigger next chunk when this close to running out (2 min)
+    pre_translate_seconds = 300, -- how far ahead to translate in progressive mode
+    advance_threshold_seconds = 60, -- trigger next chunk when this close to running out
 }
 
 local ASS_COLOR_RED = "{\\c&H8899FF&}"
