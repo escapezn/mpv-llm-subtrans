@@ -434,7 +434,12 @@ local function cleanup_chunk_dir(chunk_dir)
             os.remove(utils.join_path(chunk_dir, fname))
         end
     end
-    os.remove(chunk_dir)
+    -- os.remove can't remove directories on Windows
+    if IS_WINDODWS then
+        os.execute("rmdir /s /q \"" .. chunk_dir .. "\"")
+    else
+        os.remove(chunk_dir)
+    end
 end
 
 function progressive_translate()
