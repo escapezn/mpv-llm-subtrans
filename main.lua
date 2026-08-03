@@ -419,6 +419,7 @@ local session = nil  -- {chunk_index, translated_end_sec, chunk_files, chunk_dir
 local chunk_py_handle = nil
 local chunk_timer = nil
 local chunk_ov = nil
+local created_chunk_dirs = {}  -- chunk dirs created this mpv session, cleaned on shutdown
 
 local function format_time(sec)
     local m = math.floor(sec / 60)
@@ -459,7 +460,6 @@ function progressive_translate()
         end
         -- Reload original subtitles
         mp.command_native({name="sub-reload"})
-        cleanup_chunk_dir(session.chunk_dir)
         session = nil
         chunk_py_handle = nil
         msg.info("Progressive translation cancelled")
@@ -495,7 +495,6 @@ function progressive_translate()
         else
             remove_ov(3)
         end
-        cleanup_chunk_dir(session.chunk_dir)
         session = nil
         if chunk_py_handle ~= nil then
             mp.abort_async_command(chunk_py_handle)
@@ -584,6 +583,7 @@ function progressive_translate()
 
     -- Set up chunk directory
     local chunk_dir = utils.join_path(output_dir, ".subtrans_chunks")
+    table.insert(created_chunk_dirs, chunk_dir)
     -- Clean up old chunks
     local old_chunks = utils.readdir(chunk_dir)
     if old_chunks ~= nil then
@@ -778,7 +778,6 @@ function progressive_translate()
                 show(ASS_COLOR_GREEN .. "all done")
                 msg.info("Progressive translation complete")
                 remove_ov(5)
-                cleanup_chunk_dir(session.chunk_dir)
                 session = nil
                 chunk_ov = nil
                 return
@@ -846,7 +845,6 @@ function progressive_translate()
                 show(ASS_COLOR_GREEN .. "all done")
                 msg.info("Progressive translation complete")
                 remove_ov(3)
-                cleanup_chunk_dir(session.chunk_dir)
                 session = nil
                 chunk_ov = nil
                 chunk_timer:kill()
@@ -879,3 +877,11 @@ end
 require "mp.options".read_options(options, "llm_subtrans")
 mp.add_key_binding('alt+t', "subtrans", progressive_translate)
 mp.add_key_binding('alt+shift+t', "subtrans-full", llm_subtrans_translate)
+
+-- Clean up temporary chunk directories when mpv exits
+mp.register_event("shutdown", function()
+    for _, chunk_dir in ipairs(created_chunk_dirs) do
+        cleanup_chunk_dir(chunk_dir)
+    end
+    created_chunk_dirs = {}
+end)
