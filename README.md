@@ -83,11 +83,23 @@ Not working:
 
 ## Tips
 
-- The default key binding is `Alt+T`, press once to start,
-  press again to cancel.
+- Two translation modes are available:
+  - `Alt+T` starts **progressive translation**: it starts from the current
+    playback position and translates ahead in chunks (default 5 minutes,
+    configurable via `pre_translate_seconds`). It continues automatically
+    when playback approaches the end of the translated content (default
+    within 60 seconds, configurable via `advance_threshold_seconds`).
+    Press again to cancel.
+  - `Alt+Shift+T` starts **full translation**: translates all subtitles
+    from the beginning to the end in one pass. Press again to cancel.
 - You can watch while the translation is in progress. As long as the
   translation progess (displayed in the upper left corner) exceeds your
   playback progress, you will not miss a sentence.
-- All translated subsitles can be found at
-  `%LOCALAPPDATA%\mpv\cache\llm_subtrans_subtitles` or
-  `~/.cache/mpv/llm_subtrans_subtitles`.
+- Translated subtitles are saved as `<video name>.srt` next to the video
+  file by default. For videos without a local path (e.g. HTTP streams),
+  they fall back to the Desktop. You can override the directory with the
+  `output_dir` option.
+
+Both modes load translated subtitles on the fly, and temporary files
+(`.subtrans_chunks` directories and `.progress` files) are cleaned up
+automatically when mpv exits.
