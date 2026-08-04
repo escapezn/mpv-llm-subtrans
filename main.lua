@@ -242,7 +242,12 @@ local function resolve_output_path()
         local video_dir = utils.split_path(mp.get_property("path"))
         if video_dir == nil or video_dir == "" then
             -- fallback when no directory can be determined (e.g. URL)
-            output_dir = "~~cache/llm_subtrans_subtitles"
+            local desktop_dir = os.getenv("USERPROFILE") or os.getenv("HOME")
+            if desktop_dir ~= nil and desktop_dir ~= "" then
+                output_dir = utils.join_path(desktop_dir, "Desktop")
+            else
+                output_dir = mp.get_script_directory()
+            end
         else
             output_dir = video_dir
         end
