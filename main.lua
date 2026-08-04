@@ -613,6 +613,7 @@ function progressive_translate()
     session.chunk_dir = chunk_dir
     session.chunk_index = 0
     session.chunk_files = {}
+    session.sub_added = false  -- translated subtitle track added to mpv
     session.last_translated_seq = 0  -- for precise chunk boundary skipping
 
     -- Check API key
@@ -638,6 +639,21 @@ function progressive_translate()
 
     -- Helper: start a chunk translation
     local ipc_read_timer = nil
+
+    -- Merge chunk files into the final SRT
+    local function merge_srt(src_paths)
+        local final = io.open(session.srt_path, "w")
+        if final == nil then return end
+        for _, cf in ipairs(src_paths) do
+            local src = io.open(cf, "r")
+            if src ~= nil then
+                final:write(src:read("*a"))
+                src:close()
+            end
+        end
+        final:close()
+    end
+
     local function start_chunk(start_sec, end_sec)
         if chunk_py_handle ~= nil then
             msg.warn("start_chunk called but Python process already running")
@@ -742,20 +758,14 @@ function progressive_translate()
             end
 
             -- Concatenate all chunks into final SRT
-            local final = io.open(session.srt_path, "w")
-            if final ~= nil then
-                for _, cf in ipairs(session.chunk_files) do
-                    local src = io.open(cf, "r")
-                    if src ~= nil then
-                        final:write(src:read("*a"))
-                        src:close()
-                    end
-                end
-                final:close()
-            end
+            merge_srt(session.chunk_files)
 
             -- Reload or add subtitles
-            if #session.chunk_files == 1 then
+            if session.sub_added then
+                -- Subsequent chunks: reload
+                msg.info("Reload translated subtitles (chunk #" .. ci .. ")")
+                mp.command_native({name="sub-reload"})
+            else
                 -- First chunk: add the translated subtitle track
                 msg.info("Add translated subtitles")
                 mp.command_native({
@@ -763,10 +773,7 @@ function progressive_translate()
                     url=session.srt_path,
                     title="Translated",
                 })
-            else
-                -- Subsequent chunks: reload
-                msg.info("Reload translated subtitles (chunk #" .. ci .. ")")
-                mp.command_native({name="sub-reload"})
+                session.sub_added = true
             end
 
             -- Check for end-of-video
@@ -801,6 +808,46 @@ function progressive_translate()
                 show(string.format("translating %s / %s",
                     format_time(end_ms / 1000),
                     format_time(end_sec)))
+
+                -- Incrementally load translated content:
+                -- first time: as soon as any content is translated
+                -- afterwards: when playback approaches the end of what was loaded
+                local pos_ms = mp.get_property_native("time-pos", 0) * 1000
+                local should_load = false
+                if not session.sub_added then
+                    should_load = end_ms > pos_ms
+                elseif session.last_loaded_end_ms ~= nil then
+                    should_load = end_ms > pos_ms and session.last_loaded_end_ms - pos_ms < 10 * 1000
+                end
+
+                if should_load then
+                    local now = mp.get_time()
+                    if session.last_reload_time == nil or now - session.last_reload_time >= 2 then
+                        session.last_reload_time = now
+                        session.last_loaded_end_ms = end_ms
+
+                        -- Merge completed chunks + current chunk partial content
+                        local all_paths = {}
+                        for _, f in ipairs(session.chunk_files) do
+                            table.insert(all_paths, f)
+                        end
+                        table.insert(all_paths, chunk_srt)
+                        merge_srt(all_paths)
+
+                        if session.sub_added then
+                            msg.info("Reload translated subtitles (incremental)")
+                            mp.command_native({name="sub-reload"})
+                        else
+                            msg.info("Add translated subtitles")
+                            mp.command_native({
+                                name="sub-add",
+                                url=session.srt_path,
+                                title="Translated",
+                            })
+                            session.sub_added = true
+                        end
+                    end
+                end
             end
         end)
     end
