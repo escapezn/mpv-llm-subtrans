@@ -374,6 +374,7 @@ function llm_subtrans_translate()
 
     -- set ipc file
     local ipc_path = utils.join_path(output_dir, ".progress")
+    table.insert(created_temp_files, ipc_path)
     os.remove(ipc_path)
 
     -- check api key & setup env vars
@@ -489,6 +490,7 @@ local chunk_py_handle = nil
 local chunk_timer = nil
 local chunk_ov = nil
 local created_chunk_dirs = {}  -- chunk dirs created this mpv session, cleaned on shutdown
+local created_temp_files = {}  -- temp files created this mpv session, cleaned on shutdown
 
 local function format_time(sec)
     local m = math.floor(sec / 60)
@@ -928,4 +930,8 @@ mp.register_event("shutdown", function()
         cleanup_chunk_dir(chunk_dir)
     end
     created_chunk_dirs = {}
+    for _, temp_file in ipairs(created_temp_files) do
+        os.remove(temp_file)
+    end
+    created_temp_files = {}
 end)
