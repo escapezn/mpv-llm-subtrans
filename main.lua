@@ -154,6 +154,151 @@ local function get_python_exec_args()
     end
 end
 
+--- Create OSD overlay with show/remove helpers
+-- @return ov, show(msg), remove_ov(delay_secs)
+local function create_osd()
+    local ov = mp.create_osd_overlay("ass-events")
+    local function show(msg)
+        ov.data = "{\\b1}{\\fs32}LLM SubTrans{\\b0} - " .. msg
+        ov:update()
+    end
+    local function remove_ov(delay_secs)
+        if delay_secs == nil or delay_secs == 0 then
+            ov:remove()
+        else
+            mp.add_timeout(delay_secs, function()
+                ov:remove()
+            end)
+        end
+    end
+    return ov, show, remove_ov
+end
+
+--- Check python, openai module and ffmpeg availability
+-- @return boolean, error_msg
+local function check_environment(py_args, py_type)
+    -- check python-openai
+    if not options.skip_env_check and py_type == "python" then
+        local ok, _ = check_python_openai(py_args[1])
+        if not ok then
+            return false, "Python module `openai` not found"
+        end
+    end
+
+    -- check ffmpeg
+    if not options.skip_env_check then
+        if not check_ffmpeg(options.ffmpeg_bin) then
+            return false, "`ffmpeg` not found"
+        end
+    end
+    return true, nil
+end
+
+--- Select current or first subtitle track
+-- @return sub_track | nil
+local function select_subtitle_track()
+    local sub_track = mp.get_property_native("current-tracks/sub")
+    if sub_track == nil then
+        -- find first subtitle track
+        local tracks = mp.get_property_native("track-list")
+        for _, track in ipairs(tracks) do
+            if track.type == "sub" then
+                sub_track = track
+                break
+            end
+        end
+    end
+    return sub_track
+end
+
+--- Get video URL and external subtitle URL, validate external subtitles
+-- @return video_url, ext_sub_url, error_msg
+local function get_video_url(sub_track)
+    local ext_sub_url = ""
+    if sub_track["external"] then
+        ext_sub_url = sub_track["external-filename"]
+        msg.info("External subtitle " .. ext_sub_url)
+        if not ext_sub_url:match("%.srt$") then
+            -- TODO: support ass subtitle?
+            return nil, nil, "only support SubRip (.srt) for external subtitles"
+        end
+        if ext_sub_url:match("^https?://") then
+            -- TODO: support http subtitle?
+            return nil, nil, "only support external subtitles from local file"
+        end
+    end
+
+    -- TODO: check video url protocol
+    local video_url = mp.get_property("path")
+    return video_url, ext_sub_url, nil
+end
+
+--- Resolve output directory and srt file path
+-- @return output_dir, srt_path
+local function resolve_output_path()
+    local output_dir
+    if options.output_dir == "" then
+        -- default: save next to the currently playing video file
+        local video_dir = utils.split_path(mp.get_property("path"))
+        if video_dir == nil or video_dir == "" then
+            -- fallback when no directory can be determined (e.g. URL)
+            output_dir = "~~cache/llm_subtrans_subtitles"
+        else
+            output_dir = video_dir
+        end
+        output_dir = mp.command_native({"expand-path", output_dir})
+    else
+        output_dir = mp.command_native({"expand-path", options.output_dir})
+    end
+    local srt_path = utils.join_path(output_dir, mp.get_property("filename/no-ext") .. ".srt")
+    return output_dir, srt_path
+end
+
+--- Read {panic: "msg"} from ipc file
+-- @return string | nil
+local function read_panic_msg(ipc_path)
+    local ipc = io.open(ipc_path, "r")
+    if ipc == nil then return nil end
+    local state = utils.parse_json(ipc:read("*a"))
+    if state == nil then return nil end
+    return state["panic"]
+end
+
+--- Build full python args list (without mutating py_args)
+-- @param py_args python executable args
+-- @param py_script path to subtrans.py
+-- @param opts table: video_url, ext_sub_url, sub_track, output_path, ipc_path
+-- @param extra_args optional array of extra args to append
+-- @return args array
+local function build_py_args(py_args, py_script, opts, extra_args)
+    local args = {}
+    for _, v in ipairs(py_args) do
+        table.insert(args, v)
+    end
+    table.insert(args, py_script)
+    for _, v in ipairs({
+        "--model", options.model,
+        "--base-url", options.base_url,
+        "--ffmpeg-bin", options.ffmpeg_bin,
+        "--video-url", opts.video_url,
+        "--subtitle-url", opts.ext_sub_url,
+        "--sub-track-id", opts.sub_track.id - 1 .. "",
+        "--batch-size", options.batch_size .. "",
+        "--dest-lang", options.dest_lang,
+        "--extra-prompt", options.extra_prompt,
+        "--output-path", opts.output_path,
+        "--ipc-path", opts.ipc_path,
+    }) do
+        table.insert(args, v)
+    end
+    if extra_args ~= nil then
+        for _, v in ipairs(extra_args) do
+            table.insert(args, v)
+        end
+    end
+    return args
+end
+
 local running = false
 local py_handle = nil
 
@@ -172,20 +317,7 @@ function llm_subtrans_translate()
     running = true
 
     -- show osd
-    local ov = mp.create_osd_overlay("ass-events")
-    local function show(msg)
-        ov.data = "{\\b1}{\\fs32}LLM SubTrans{\\b0} - " .. msg
-        ov:update()
-    end
-    local function remove_ov(delay_secs)
-        if delay_secs == nil or delay_secs == 0 then
-            ov:remove()
-        else
-            mp.add_timeout(delay_secs, function ()
-                ov:remove()
-            end)
-        end
-    end
+    local _, show, remove_ov = create_osd()
     show("checking")
 
     -- function to reset state
@@ -216,86 +348,33 @@ function llm_subtrans_translate()
         return abort("Python not found")
     end
 
-    -- check python-openai
-    if not options.skip_env_check and py_type == "python" then
-        local ok, _ = check_python_openai(py_args[1])
-        if not ok then
-            return abort("Python module `openai` not found")
-        end
-    end
-
-    -- check ffmpeg
-    if not options.skip_env_check then
-        if not check_ffmpeg(options.ffmpeg_bin) then
-            return abort("`ffmpeg` not found")
-        end
+    -- check python-openai & ffmpeg
+    local env_ok, env_err = check_environment(py_args, py_type)
+    if not env_ok then
+        return abort(env_err)
     end
 
     -- select subtitle track
-    local sub_track = mp.get_property_native("current-tracks/sub")
+    local sub_track = select_subtitle_track()
     if sub_track == nil then
-        -- find first subtitle track
-        local tracks = mp.get_property_native("track-list")
-        for _, track in ipairs(tracks) do
-            if track.type == "sub" then
-                sub_track = track
-                break
-            end
-        end
+        return abort("no source subtitle found")
     end
-    if sub_track == nil then
-        return abort("no source substitle found")
-    end
-    msg.info("Select substitle track#" .. sub_track.id, sub_track.title)
-
-    local ext_sub_url = ""
-    if sub_track["external"] then
-        ext_sub_url = sub_track["external-filename"]
-        msg.info("External substitle " .. ext_sub_url)
-        if not ext_sub_url:match("%.srt$") then
-            -- TODO: support ass subtitle?
-            return abort("only support SubRip (.srt) for external subtitles")
-        end
-        if ext_sub_url:match("^https?://") then
-            -- TODO: support http substitle?
-            return abort("only support external subtitles from local file")
-        end
-    end
+    msg.info("Select subtitle track#" .. sub_track.id, sub_track.title)
 
     -- gather metadata
-    -- TODO: check video url protocol
-    local video_url = mp.get_property("path")
+    local video_url, ext_sub_url, url_err = get_video_url(sub_track)
+    if url_err ~= nil then
+        return abort(url_err)
+    end
 
     -- set file path
     show("initializing")
-    local output_dir
-    if options.output_dir == "" then
-        -- default: save next to the currently playing video file
-        local video_dir = utils.split_path(mp.get_property("path"))
-        if video_dir == nil or video_dir == "" then
-            -- fallback when no directory can be determined (e.g. URL)
-            output_dir = "~~cache/llm_subtrans_subtitles"
-        else
-            output_dir = video_dir
-        end
-        output_dir = mp.command_native({"expand-path", output_dir})
-    else
-        output_dir = mp.command_native({"expand-path", options.output_dir})
-    end
-    local srt_path = utils.join_path(output_dir, mp.get_property("filename/no-ext") .. ".srt")
+    local output_dir, srt_path = resolve_output_path()
     msg.info("Save file to", srt_path)
 
     -- set ipc file
     local ipc_path = utils.join_path(output_dir, ".progress")
     os.remove(ipc_path)
-    local function read_panic_msg()
-        -- read {panic: "msg"} from ipc file
-        local ipc = io.open(ipc_path, "r");
-        if ipc == nil then return nil end
-        local state = utils.parse_json(ipc:read("*a"))
-        if state == nil then return nil end
-        return state["panic"]
-    end
 
     -- check api key & setup env vars
     local env = get_env_with_api_key()
@@ -309,27 +388,17 @@ function llm_subtrans_translate()
         return abort("script not install as directory")
     end
     local py_script = utils.join_path(script_dir, "subtrans.py")
-    local tail_args = {
-        py_script,
-        "--model", options.model,
-        "--base-url", options.base_url,
-        "--ffmpeg-bin", options.ffmpeg_bin,
-        "--video-url", video_url,
-        "--subtitle-url", ext_sub_url,
-        "--sub-track-id", sub_track.id - 1 .. "",
-        "--batch-size", options.batch_size .. "",
-        "--dest-lang", options.dest_lang,
-        "--extra-prompt", options.extra_prompt,
-        "--output-path", srt_path,
-        "--ipc-path", ipc_path,
-    }
-    for _, v in ipairs(tail_args) do
-        table.insert(py_args, v)
-    end
-    msg.debug("Execute", utils.format_json(py_args))
+    local tail_args = build_py_args(py_args, py_script, {
+        video_url=video_url,
+        ext_sub_url=ext_sub_url,
+        sub_track=sub_track,
+        output_path=srt_path,
+        ipc_path=ipc_path,
+    })
+    msg.debug("Execute", utils.format_json(tail_args))
     py_handle = mp.command_native_async({
         name="subprocess",
-        args=py_args,
+        args=tail_args,
         env=env,
         playback_only=false,
     }, function (success, result, error)
@@ -342,7 +411,7 @@ function llm_subtrans_translate()
             return abort()
         end
         if result.status ~= 0 then
-            local panic = read_panic_msg()
+            local panic = read_panic_msg(ipc_path)
             if panic ~= nil then
                 return abort(panic)
             else
@@ -470,21 +539,8 @@ function progressive_translate()
     session = {}
 
     -- OSD overlay
-    local ov = mp.create_osd_overlay("ass-events")
+    local ov, show, remove_ov = create_osd()
     chunk_ov = ov
-    local function show(msg_text)
-        ov.data = "{\\b1}{\\fs32}LLM SubTrans{\\b0} - " .. msg_text
-        ov:update()
-    end
-    local function remove_ov(delay_secs)
-        if delay_secs == nil or delay_secs == 0 then
-            ov:remove()
-        else
-            mp.add_timeout(delay_secs, function()
-                ov:remove()
-            end)
-        end
-    end
 
     -- Abort helper
     local function abort_session(error_msg)
@@ -515,68 +571,29 @@ function progressive_translate()
         return abort_session("Python not found")
     end
 
-    -- Check python-openai
-    if not options.skip_env_check and py_type == "python" then
-        local ok, _ = check_python_openai(py_args[1])
-        if not ok then
-            return abort_session("Python module `openai` not found")
-        end
-    end
-
-    -- Check ffmpeg
-    if not options.skip_env_check then
-        if not check_ffmpeg(options.ffmpeg_bin) then
-            return abort_session("`ffmpeg` not found")
-        end
+    -- Check python-openai & ffmpeg
+    local env_ok, env_err = check_environment(py_args, py_type)
+    if not env_ok then
+        return abort_session(env_err)
     end
 
     -- Select subtitle track
-    local sub_track = mp.get_property_native("current-tracks/sub")
-    if sub_track == nil then
-        local tracks = mp.get_property_native("track-list")
-        for _, track in ipairs(tracks) do
-            if track.type == "sub" then
-                sub_track = track
-                break
-            end
-        end
-    end
+    local sub_track = select_subtitle_track()
     if sub_track == nil then
         return abort_session("no source subtitle found")
     end
     msg.info("Select subtitle track#" .. sub_track.id, sub_track.title)
     session.sub_track = sub_track
 
-    local ext_sub_url = ""
-    if sub_track["external"] then
-        ext_sub_url = sub_track["external-filename"]
-        msg.info("External subtitle " .. ext_sub_url)
-        if not ext_sub_url:match("%.srt$") then
-            return abort_session("only support SubRip (.srt) for external subtitles")
-        end
-        if ext_sub_url:match("^https?://") then
-            return abort_session("only support external subtitles from local file")
-        end
-    end
-
     -- Gather metadata
-    local video_url = mp.get_property("path")
+    local video_url, ext_sub_url, url_err = get_video_url(sub_track)
+    if url_err ~= nil then
+        return abort_session(url_err)
+    end
 
     -- Set output path
     show("initializing")
-    local output_dir
-    if options.output_dir == "" then
-        local video_dir = utils.split_path(mp.get_property("path"))
-        if video_dir == nil or video_dir == "" then
-            output_dir = "~~cache/llm_subtrans_subtitles"
-        else
-            output_dir = video_dir
-        end
-        output_dir = mp.command_native({"expand-path", output_dir})
-    else
-        output_dir = mp.command_native({"expand-path", options.output_dir})
-    end
-    local srt_path = utils.join_path(output_dir, mp.get_property("filename/no-ext") .. ".srt")
+    local output_dir, srt_path = resolve_output_path()
     msg.info("Save file to", srt_path)
     session.output_dir = output_dir
     session.srt_path = srt_path
@@ -638,29 +655,17 @@ function progressive_translate()
         ))
         show(string.format("translating %s - %s", format_time(start_sec), format_time(end_sec)))
 
-        local chunk_args = {}
-        for _, v in ipairs(py_args) do
-            table.insert(chunk_args, v)
-        end
-        for _, v in ipairs({
-            py_script,
-            "--model", options.model,
-            "--base-url", options.base_url,
-            "--ffmpeg-bin", options.ffmpeg_bin,
-            "--video-url", video_url,
-            "--subtitle-url", ext_sub_url,
-            "--sub-track-id", sub_track.id - 1 .. "",
-            "--batch-size", options.batch_size .. "",
-            "--dest-lang", options.dest_lang,
-            "--extra-prompt", options.extra_prompt,
-            "--output-path", chunk_srt,
-            "--ipc-path", chunk_ipc,
+        local chunk_args = build_py_args(py_args, py_script, {
+            video_url=video_url,
+            ext_sub_url=ext_sub_url,
+            sub_track=sub_track,
+            output_path=chunk_srt,
+            ipc_path=chunk_ipc,
+        }, {
             "--start-offset", string.format("%.3f", start_sec),
             "--max-duration", string.format("%.3f", end_sec - start_sec),
             "--start-seq", session.last_translated_seq .. "",
-        }) do
-            table.insert(chunk_args, v)
-        end
+        })
         msg.debug("Execute chunk", utils.format_json(chunk_args))
 
         -- Clean up previous IPC timer
@@ -697,15 +702,7 @@ function progressive_translate()
 
             if result.status ~= 0 then
                 -- Try to read panic message from IPC
-                local ipc = io.open(chunk_ipc, "r")
-                local panic_msg = nil
-                if ipc ~= nil then
-                    local state = utils.parse_json(ipc:read("*a"))
-                    if state ~= nil then
-                        panic_msg = state["panic"]
-                    end
-                    ipc:close()
-                end
+                local panic_msg = read_panic_msg(chunk_ipc)
                 if panic_msg ~= nil then
                     return abort_session(panic_msg)
                 else
